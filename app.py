@@ -9,6 +9,12 @@ import os
 from dotenv import load_dotenv
 import uuid
 
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 # Load environment variables
 load_dotenv()
 
@@ -38,6 +44,52 @@ except Exception as e:
     st.error(f"Failed to connect to Supabase: {e}")
     SUPABASE_CONNECTED = False
 
+def validate_image(file):
+    """Validate uploaded image"""
+    if file is None:
+        return True
+    
+    # Check file size (max 5MB)
+    if file.size > 5 * 1024 * 1024:
+        st.warning(f"⚠️ {file.name} is too large (max 5MB). Image skipped.")
+        return False
+    
+    # Check file type
+    allowed_types = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp']
+    if file.type not in allowed_types:
+        st.warning(f"⚠️ {file.name} has invalid type. Only PNG/JPG/WEBP allowed.")
+        return False
+    
+    return True
+
+def compress_image(file, max_size_mb=1):
+    """Compress image if larger than max_size_mb"""
+    if file is None or file.size <= max_size_mb * 1024 * 1024:
+        return file
+    
+    try:
+        img = Image.open(file)
+        
+        # Convert to RGB if needed
+        if img.mode in ('RGBA', 'P'):
+            img = img.convert('RGB')
+        
+        # Compress
+        output = BytesIO()
+        quality = 85
+        img.save(output, format='JPEG', quality=quality, optimize=True)
+        output.seek(0)
+        
+        # Create new file-like object
+        output.name = file.name.rsplit('.', 1)[0] + '.jpg'
+        output.type = 'image/jpeg'
+        
+        st.info(f"✅ Compressed {file.name} from {file.size/1024:.0f}KB to {output.getbuffer().nbytes/1024:.0f}KB")
+        return output
+    except Exception as e:
+        logger.error(f"Error compressing image: {e}")
+        return file
+
 # ============================================
 # SUPABASE FUNCTIONS
 # ============================================
@@ -46,6 +98,13 @@ def upload_image_to_supabase(file, folder="products"):
     """Upload image to Supabase Storage"""
     if file is None:
         return None
+    
+    # Validate image
+    if not validate_image(file):
+        return None
+    
+    # Compress image
+    file = compress_image(file)
     
     try:
         # Generate unique filename
@@ -61,12 +120,14 @@ def upload_image_to_supabase(file, folder="products"):
             file_bytes,
             {
                 "content-type": file.type,
-                "x-upsert": "true"  # Overwrite if exists
+                "x-upsert": "true"
             }
         )
         
         # Get public URL
         public_url = supabase.storage.from_('product-images').get_public_url(unique_name)
+        
+        logger.info(f"Image uploaded successfully: {unique_name}")
         
         return {
             'filename': file.name,
@@ -75,7 +136,8 @@ def upload_image_to_supabase(file, folder="products"):
         }
     
     except Exception as e:
-        st.error(f"Error uploading image: {e}")
+        logger.error(f"Error uploading image: {e}")
+        st.error(f"Error uploading {file.name}: {str(e)[:100]}")
         return None
 
 def save_product_to_supabase(product_data):
@@ -83,20 +145,24 @@ def save_product_to_supabase(product_data):
     try:
         # Insert into products table
         result = supabase.table('products').insert(product_data).execute()
+        logger.info(f"Product saved: {product_data.get('product_name')}")
         return result.data[0] if result.data else None
     
     except Exception as e:
-        st.error(f"Error saving product: {e}")
+        logger.error(f"Error saving product: {e}")
+        st.error(f"Error saving product: {str(e)[:200]}")
         return None
 
 def get_all_products_from_supabase():
     """Fetch all products from Supabase"""
     try:
         result = supabase.table('products').select("*").order('created_at', desc=True).execute()
+        logger.info(f"Fetched {len(result.data)} products from database")
         return result.data
     
     except Exception as e:
-        st.error(f"Error fetching products: {e}")
+        logger.error(f"Error fetching products: {e}")
+        st.error(f"Error fetching products: {str(e)[:100]}")
         return []
 
 def delete_product_from_supabase(product_id):
@@ -104,14 +170,12 @@ def delete_product_from_supabase(product_id):
     try:
         # Delete product
         supabase.table('products').delete().eq('id', product_id).execute()
-        
-        # Optionally delete associated images
-        # (You might want to implement this based on stored image paths)
-        
+        logger.info(f"Product deleted: {product_id}")
         return True
     
     except Exception as e:
-        st.error(f"Error deleting product: {e}")
+        logger.error(f"Error deleting product: {e}")
+        st.error(f"Error deleting product: {str(e)[:100]}")
         return False
 
 def search_products(query):
@@ -120,10 +184,12 @@ def search_products(query):
         result = supabase.table('products').select("*").or_(
             f"product_name.ilike.%{query}%,sku.ilike.%{query}%"
         ).execute()
+        logger.info(f"Search for '{query}' returned {len(result.data)} results")
         return result.data
     
     except Exception as e:
-        st.error(f"Error searching products: {e}")
+        logger.error(f"Error searching products: {e}")
+        st.error(f"Error searching products: {str(e)[:100]}")
         return []
 
 # ============================================
@@ -250,7 +316,8 @@ with st.sidebar:
         product_count = 0
     
     st.markdown(f"**Total Products:** {product_count}")
-    st.markdown(f"**Last Updated:** {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    if st.button("🔄 Refresh", key="refresh_count", use_container_width=True):
+        st.rerun()
 
 # ============================================
 # PAGE 0: DATABASE SETUP
@@ -534,26 +601,40 @@ elif page == "➕ Add New Product":
             elif not SUPABASE_CONNECTED:
                 st.error("❌ Database not connected. Check setup.")
             else:
-                with st.spinner("Uploading images and saving product..."):
-                    
+                # Create progress indicators
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                try:
                     # Upload main image
+                    status_text.text("⏳ Step 1/5: Uploading main image...")
+                    progress_bar.progress(10)
                     main_image_data = upload_image_to_supabase(main_image, "products/main") if main_image else None
                     
                     # Upload gallery images
+                    status_text.text("⏳ Step 2/5: Uploading gallery images...")
+                    progress_bar.progress(25)
                     gallery_data = []
                     if gallery_images:
-                        for img in gallery_images:
+                        for idx, img in enumerate(gallery_images):
                             img_data = upload_image_to_supabase(img, "products/gallery")
                             if img_data:
                                 gallery_data.append(img_data)
+                            progress_bar.progress(25 + (idx + 1) * 15 // len(gallery_images))
+                    else:
+                        progress_bar.progress(40)
                     
                     # Upload variation images
+                    status_text.text("⏳ Step 3/5: Processing variations...")
+                    progress_bar.progress(50)
                     if product_type == "Variable Product":
                         for var in variations_data:
                             if var['image']:
                                 var['image'] = upload_image_to_supabase(var['image'], "products/variations")
                     
                     # Upload deep customization images
+                    status_text.text("⏳ Step 4/5: Uploading customization images...")
+                    progress_bar.progress(65)
                     if product_type == "Cricket Bat (Deep Customization)" and enable_deep_custom:
                         if deep_custom_data['edition']['image']:
                             deep_custom_data['edition']['image'] = upload_image_to_supabase(
@@ -567,6 +648,7 @@ elif page == "➕ Add New Product":
                             )
                     
                     # Compile product data
+                    progress_bar.progress(80)
                     product_data = {
                         'product_name': product_name,
                         'product_type': product_type,
@@ -590,16 +672,51 @@ elif page == "➕ Add New Product":
                     }
                     
                     # Save to Supabase
+                    status_text.text("⏳ Step 5/5: Saving to database...")
+                    progress_bar.progress(90)
                     result = save_product_to_supabase(product_data)
+                    
+                    progress_bar.progress(100)
+                    status_text.text("✅ Complete!")
                     
                     if result:
                         st.success(f"✅ Product '{product_name}' saved successfully to database!")
                         st.balloons()
                         
                         # Show product ID
-                        st.info(f"📝 Product ID: {result['id']}")
+                        # Show product details
+                        with st.expander("📝 View Saved Product Details", expanded=True):
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.write(f"**Product ID:** {result['id']}")
+                                st.write(f"**Name:** {product_name}")
+                                st.write(f"**Type:** {product_type}")
+                                st.write(f"**Price:** ₹{regular_price:,.2f}")
+                            with col2:
+                                st.write(f"**SKU:** {sku or 'N/A'}")
+                                st.write(f"**Stock:** {stock_status}")
+                                st.write(f"**Quantity:** {stock_quantity}")
+                                if main_image_data:
+                                    st.image(main_image_data['url'], width=150, caption="Main Image")
+                        
+                        # Add another product button
+                        col_a, col_b, col_c = st.columns([2, 1, 2])
+                        with col_b:
+                            if st.button("➕ Add Another Product", key="add_another", use_container_width=True):
+                                st.rerun()
                     else:
                         st.error("❌ Failed to save product. Check error messages above.")
+                
+                except Exception as e:
+                    logger.error(f"Error in save process: {e}")
+                    st.error(f"❌ Error during save: {e}")
+                
+                finally:
+                    # Clean up progress indicators after 2 seconds
+                    import time
+                    time.sleep(2)
+                    progress_bar.empty()
+                    status_text.empty()
 
 # ============================================
 # PAGE 2: VIEW ALL PRODUCTS
@@ -685,9 +802,17 @@ elif page == "📋 View All Products":
                             st.json(product)
                     with col2:
                         if st.button("🗑️ Delete", key=f"delete_{product['id']}", type="secondary"):
-                            if delete_product_from_supabase(product['id']):
-                                st.success("✅ Product deleted!")
-                                st.rerun()
+                            # Add confirmation
+                            if st.session_state.get(f"confirm_delete_{product['id']}", False):
+                                if delete_product_from_supabase(product['id']):
+                                    st.success("✅ Product deleted!")
+                                    logger.info(f"Product deleted: {product.get('product_name')}")
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Failed to delete product")
+                            else:
+                                st.session_state[f"confirm_delete_{product['id']}"] = True
+                                st.warning("⚠️ Click delete again to confirm")
                     
                     st.markdown('</div>', unsafe_allow_html=True)
                     st.markdown("---")
@@ -833,7 +958,8 @@ elif page == "📊 Export Data":
             st.dataframe(df, use_container_width=True)
             
             # Product count by type
-            st.markdown("---")
+            st.markdown("---")            
+            
             st.markdown("### 📊 Analytics")
             
             col1, col2 = st.columns(2)
@@ -857,11 +983,56 @@ elif page == "📊 Export Data":
                 
                 for status, count in stock_counts.items():
                     st.write(f"- {status}: {count}")
-
+            # Database Backup
+            st.markdown("### 💾 Full Database Backup")
+            st.info("📦 Create a complete backup of all products including metadata and statistics")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("🔄 Create Full Backup", use_container_width=True):
+                    backup_data = {
+                        'backup_info': {
+                            'created_at': datetime.now().isoformat(),
+                            'total_products': len(products),
+                            'app_version': 'v2.0',
+                            'database': 'Supabase'
+                        },
+                        'products': products,
+                        'statistics': {
+                            'by_type': type_counts,
+                            'by_stock': stock_counts,
+                            'total_value': float(total_value)
+                        }
+                    }
+                    
+                    backup_json = json.dumps(backup_data, indent=2, default=str)
+                    
+                    st.download_button(
+                        label="⬇️ Download Full Backup (JSON)",
+                        data=backup_json,
+                        file_name=f"full_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                        mime="application/json",
+                        use_container_width=True,
+                        key="download_backup"
+                    )
+                    
+                    st.success("✅ Backup file ready for download!")
+                    logger.info(f"Backup created with {len(products)} products")
+            
+            with col2:
+                st.markdown("**Backup includes:**")
+                st.write("- All product data")
+                st.write("- Product images URLs")
+                st.write("- Statistics & analytics")
+                st.write("- Timestamp & metadata")
 # ============================================
 # FOOTER
 # ============================================
 st.markdown("---")
+    
+    
+
 st.markdown(
     """
     <div style='text-align: center; color: #666; padding: 2rem 0;'>
