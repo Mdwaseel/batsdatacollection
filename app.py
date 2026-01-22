@@ -32,8 +32,13 @@ st.set_page_config(
 # Direct Supabase initialization (no caching)
 def init_supabase():
     """Initialize Supabase client"""
-    url = "https://tsxbwnfmjudhopmedymw.supabase.co"
-    key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InRzeGJ3bmZtanVkaG9wbWVkeW13Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjkxMDY1NzcsImV4cCI6MjA4NDY4MjU3N30.FyGligq5PRse4KMyeEyiMvAbImd7nS9ucBGYoS6pooU"
+    # Try to get from Streamlit secrets first, then environment variables
+    url = st.secrets.get("SUPABASE_URL", os.getenv("SUPABASE_URL", ""))
+    key = st.secrets.get("SUPABASE_KEY", os.getenv("SUPABASE_KEY", ""))
+    
+    if not url or not key:
+        st.error("⚠️ Supabase credentials not configured!")
+        st.stop()
     
     return create_client(url, key)
 
